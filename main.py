@@ -206,101 +206,213 @@ def safe_get(d: dict, key: str, default=None):
 @app.get("/api/stock/{ticker}")
 def get_stock(ticker: str):
     """
-    Renvoie les infos clés d'une action à partir de son ticker (ex: AAPL, MC.PA).
+    Renvoie les informations principales d'une action.
+
+    Si Yahoo Finance ne fournit pas regularMarketPrice dans stock.info,
+    le dernier cours de l'historique est utilisé comme solution de secours.
     """
-    # On nettoie le ticker : espaces enlevés, tout en majuscules
-    # (les tickers boursiers sont presque toujours en majuscules).
     ticker = normalize_ticker(ticker)
 
-    # Si on a déjà ces données en cache et qu'elles ont moins de 10 minutes,
-    # on les renvoie directement sans re-questionner yfinance.
     cached = get_cached("stock_cache", ticker, STOCK_CACHE_TTL)
     if cached is not None:
         return cached
 
     stock = yf.Ticker(ticker)
 
+    # stock.info peut être incomplet ou temporairement indisponible sur
+    # certains hébergeurs. Une erreur ici ne doit donc pas suffire à
+    # déclarer qu'un ticker valide est introuvable.
+    info = {}
+    info_failed = False
     try:
-        info = stock.info  # dictionnaire avec toutes les infos de l'action
+        info = stock.info or {}
     except Exception:
-        # Yahoo Finance a parfois des ratés (réponse vide, timeout, etc.)
-        # On renvoie une erreur claire plutôt que de laisser planter le serveur.
+        info_failed = True
+
+    # L'historique sert au graphique, mais aussi de solution de secours
+    # pour déterminer le cours actuel et le cours de clôture précédent.
+    history = None
+    history_failed = False
+    try:
+        history = stock.history(
+            period="1y",
+            interval="1d",
+            auto_adjust=False,
+        )
+    except Exception:
+        history_failed = True
+
+    close_series = None
+    if (
+        history is not None
+        and not history.empty
+        and "Close" in history.columns
+    ):
+        close_series = history["Close"].dropna()
+
+    # fast_info est une autre source proposée par yfinance.
+    try:
+        fast_info = stock.fast_info
+    except Exception:
+        fast_info = None
+
+    def fast_get(key):
+        if fast_info is None:
+            return None
+        try:
+            return fast_info[key]
+        except Exception:
+            try:
+                return getattr(fast_info, key)
+            except Exception:
+                return None
+
+    def as_number(value):
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(number):
+            return None
+        return number
+
+    current_price = as_number(safe_get(info, "regularMarketPrice"))
+
+    if current_price is None:
+        current_price = as_number(fast_get("last_price"))
+
+    if current_price is None and close_series is not None and not close_series.empty:
+        current_price = as_number(close_series.iloc[-1])
+
+    previous_close = as_number(safe_get(info, "previousClose"))
+
+    if previous_close is None:
+        previous_close = as_number(fast_get("previous_close"))
+
+    if (
+        previous_close is None
+        and close_series is not None
+        and len(close_series) >= 2
+    ):
+        previous_close = as_number(close_series.iloc[-2])
+
+    # Le ticker est considéré comme introuvable seulement si aucune des
+    # sources Yahoo Finance ne fournit de cours exploitable.
+    if current_price is None:
+        if info_failed and history_failed:
+            raise HTTPException(
+                status_code=502,
+                detail="Les données Yahoo Finance sont temporairement indisponibles.",
+            )
         raise HTTPException(
-            status_code=502,
-            detail="Impossible de récupérer les données depuis Yahoo Finance pour le moment. Réessaie dans un instant.",
+            status_code=404,
+            detail=f"Ticker '{ticker}' introuvable",
         )
 
-    # yfinance ne renvoie pas une vraie erreur 404 pour un ticker invalide :
-    # il renvoie souvent un dictionnaire presque vide. On détecte donc
-    # un ticker invalide en vérifiant qu'un champ de base existe.
-    if not info or safe_get(info, "regularMarketPrice") is None:
-        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' introuvable")
-
-    # Historique de prix sur 1 an (pour le graphique plus tard)
-    try:
-        history = stock.history(period="1y", interval="1d")
-    except Exception:
-        history = None
     price_history = []
-    if history is not None and not history.empty:
-        price_history = [
-            {"date": str(date.date()), "close": round(row["Close"], 2)}
-            for date, row in history.iterrows()
-        ]
+    if close_series is not None:
+        for date, close in close_series.items():
+            clean_close = as_number(close)
+            if clean_close is not None:
+                price_history.append(
+                    {
+                        "date": str(date.date()),
+                        "close": round(clean_close, 2),
+                    }
+                )
 
-    current_price = safe_get(info, "regularMarketPrice")
-    previous_close = safe_get(info, "previousClose")
     change_percent = None
-    if current_price is not None and previous_close:
-        change_percent = round((current_price - previous_close) / previous_close * 100, 2)
+    if previous_close not in (None, 0):
+        change_percent = round(
+            (current_price - previous_close) / previous_close * 100,
+            2,
+        )
 
-    # Répartition des avis d'analystes (nombre de Buy / Hold / Sell).
-    # yfinance expose ça via recommendations_summary, mais ce n'est pas
-    # toujours disponible selon le ticker : on protège avec un try/except.
     buy_count = hold_count = sell_count = None
     try:
         rec_summary = stock.recommendations_summary
         if rec_summary is not None and not rec_summary.empty:
-            latest = rec_summary.iloc[0]  # période la plus récente
-            buy_count = int(latest.get("strongBuy", 0)) + int(latest.get("buy", 0))
+            latest = rec_summary.iloc[0]
+            buy_count = int(latest.get("strongBuy", 0)) + int(
+                latest.get("buy", 0)
+            )
             hold_count = int(latest.get("hold", 0))
-            sell_count = int(latest.get("sell", 0)) + int(latest.get("strongSell", 0))
+            sell_count = int(latest.get("sell", 0)) + int(
+                latest.get("strongSell", 0)
+            )
     except Exception:
         pass
 
+    week52_high = as_number(safe_get(info, "fiftyTwoWeekHigh"))
+    if week52_high is None:
+        week52_high = as_number(fast_get("year_high"))
+    if (
+        week52_high is None
+        and close_series is not None
+        and not close_series.empty
+    ):
+        week52_high = as_number(close_series.max())
+
+    week52_low = as_number(safe_get(info, "fiftyTwoWeekLow"))
+    if week52_low is None:
+        week52_low = as_number(fast_get("year_low"))
+    if (
+        week52_low is None
+        and close_series is not None
+        and not close_series.empty
+    ):
+        week52_low = as_number(close_series.min())
+
+    market_cap = as_number(safe_get(info, "marketCap"))
+    if market_cap is None:
+        market_cap = as_number(fast_get("market_cap"))
+
+    currency = (
+        safe_get(info, "currency")
+        or fast_get("currency")
+        or "USD"
+    )
+
     result = {
         "ticker": ticker,
-        "name": safe_get(info, "longName", ticker),
+        "name": (
+            safe_get(info, "longName")
+            or safe_get(info, "shortName")
+            or ticker
+        ),
         "current_price": current_price,
         "change_percent": change_percent,
-        "week52_high": safe_get(info, "fiftyTwoWeekHigh"),
-        "week52_low": safe_get(info, "fiftyTwoWeekLow"),
-        "market_cap": safe_get(info, "marketCap"),
+        "week52_high": week52_high,
+        "week52_low": week52_low,
+        "market_cap": market_cap,
         "sector": safe_get(info, "sector"),
         "industry": safe_get(info, "industry"),
-        "pe_ratio": safe_get(info, "trailingPE"),
-        "forward_pe": safe_get(info, "forwardPE"),
-        "peg_ratio": safe_get(info, "pegRatio"),
-        "eps": safe_get(info, "trailingEps"),
-        "forward_eps": safe_get(info, "forwardEps"),
-        "profit_margin": safe_get(info, "profitMargins"),
-        "revenue_growth": safe_get(info, "revenueGrowth"),
-        "earnings_growth": safe_get(info, "earningsGrowth"),
-        "beta": safe_get(info, "beta"),
-        "debt_to_equity": safe_get(info, "debtToEquity"),
-        "dividend_yield": safe_get(info, "dividendYield"),
+        "pe_ratio": as_number(safe_get(info, "trailingPE")),
+        "forward_pe": as_number(safe_get(info, "forwardPE")),
+        "peg_ratio": as_number(safe_get(info, "pegRatio")),
+        "eps": as_number(safe_get(info, "trailingEps")),
+        "forward_eps": as_number(safe_get(info, "forwardEps")),
+        "profit_margin": as_number(safe_get(info, "profitMargins")),
+        "revenue_growth": as_number(safe_get(info, "revenueGrowth")),
+        "earnings_growth": as_number(safe_get(info, "earningsGrowth")),
+        "beta": as_number(safe_get(info, "beta")),
+        "debt_to_equity": as_number(safe_get(info, "debtToEquity")),
+        "dividend_yield": as_number(safe_get(info, "dividendYield")),
         "analyst_buy": safe_get(info, "recommendationKey"),
         "analyst_buy_count": buy_count,
         "analyst_hold_count": hold_count,
         "analyst_sell_count": sell_count,
-        "target_mean_price": safe_get(info, "targetMeanPrice"),
+        "target_mean_price": as_number(
+            safe_get(info, "targetMeanPrice")
+        ),
         "price_history": price_history,
-        "currency": safe_get(info, "currency", "USD"),
+        "currency": str(currency),
     }
 
     set_cached("stock_cache", ticker, result)
     return result
-
 
 class ResearchRequest(BaseModel):
     ticker: str
