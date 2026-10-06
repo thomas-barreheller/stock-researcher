@@ -1,0 +1,27 @@
+# Secrets et variables d’environnement
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Frontend / Node
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Sauvegardes locales
+backups/
+*.bak
+
+# Fichiers système et éditeurs
+.DS_Store
+Thumbs.db
+.vscode/
