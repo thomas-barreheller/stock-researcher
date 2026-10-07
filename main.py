@@ -959,72 +959,172 @@ RETURNS_TEXT = {
 @app.get("/api/expected-returns/{ticker}")
 def get_expected_returns(ticker: str, lang: str = "fr"):
     """
-    Module 2 : calcule le rendement théorique CAPM et le compare aux
-    objectifs de cours des analystes (bas / moyen / haut).
+    Calcule le rendement théorique CAPM et récupère les objectifs
+    des analystes. Les données historiques servent de solution de
+    secours lorsque Yahoo Finance ne fournit pas stock.info.
     """
     ticker = normalize_ticker(ticker)
     lang = resolve_lang(lang)
 
-    cache_key = f"{ticker}:{lang}"
+    cache_key = f"returns-v2:{ticker}:{lang}"
     cached = get_cached("returns_cache", cache_key, STOCK_CACHE_TTL)
     if cached is not None:
         return cached
 
+    # Cette fonction contient déjà les solutions de secours utilisant
+    # l'historique lorsque Yahoo Finance ne renvoie pas stock.info.
+    stock_data = get_stock(ticker)
     stock = yf.Ticker(ticker)
+
     try:
-        info = stock.info
+        info = stock.info or {}
     except Exception:
-        raise HTTPException(status_code=502, detail="Impossible de récupérer les données pour le moment.")
+        info = {}
 
-    if not info or safe_get(info, "regularMarketPrice") is None:
-        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' introuvable")
+    def valid_number(value):
+        try:
+            number = float(value)
+            return number if np.isfinite(number) else None
+        except (TypeError, ValueError):
+            return None
 
-    beta = safe_get(info, "beta")
-    current_price = safe_get(info, "regularMarketPrice")
-    target_mean = safe_get(info, "targetMeanPrice")
-    target_low = safe_get(info, "targetLowPrice")
-    target_high = safe_get(info, "targetHighPrice")
-    analyst_count = safe_get(info, "numberOfAnalystOpinions")
+    current_price = valid_number(stock_data.get("current_price"))
+    beta = valid_number(stock_data.get("beta"))
 
-    # Taux sans risque : rendement actuel du bon du Trésor US à 10 ans (^TNX).
-    # ^TNX cote directement en points de pourcentage (ex: 4.25 = 4,25%).
+    target_mean = valid_number(info.get("targetMeanPrice"))
+    if target_mean is None:
+        target_mean = valid_number(stock_data.get("target_mean_price"))
+
+    target_low = valid_number(info.get("targetLowPrice"))
+    target_high = valid_number(info.get("targetHighPrice"))
+    analyst_count = info.get("numberOfAnalystOpinions")
+
+    # Si le bêta n'est pas disponible dans stock.info, on l'estime à
+    # partir de deux années de variations quotidiennes face au S&P 500.
+    if beta is None:
+        try:
+            stock_history = stock.history(
+                period="2y",
+                interval="1d",
+                auto_adjust=True,
+            )
+            market_history = yf.Ticker("^GSPC").history(
+                period="2y",
+                interval="1d",
+                auto_adjust=True,
+            )
+
+            stock_returns = stock_history["Close"].pct_change().rename("stock")
+            market_returns = market_history["Close"].pct_change().rename("market")
+
+            aligned = (
+                stock_returns.to_frame()
+                .join(market_returns.to_frame(), how="inner")
+                .dropna()
+            )
+
+            if len(aligned) >= 60:
+                market_variance = np.var(
+                    aligned["market"].to_numpy(),
+                    ddof=1,
+                )
+                if market_variance > 0:
+                    covariance = np.cov(
+                        aligned["stock"].to_numpy(),
+                        aligned["market"].to_numpy(),
+                        ddof=1,
+                    )[0, 1]
+                    beta = float(covariance / market_variance)
+        except Exception:
+            beta = None
+
+    # Taux sans risque : rendement du bon du Trésor américain à 10 ans.
+    # Plusieurs sources Yahoo sont essayées successivement.
+    risk_free_rate_pct = None
     try:
         tnx = yf.Ticker("^TNX")
-        risk_free_rate = safe_get(tnx.info, "regularMarketPrice")
-        risk_free_rate = risk_free_rate / 100 if risk_free_rate else None
+
+        try:
+            tnx_info = tnx.info or {}
+            risk_free_rate_pct = valid_number(
+                tnx_info.get("regularMarketPrice")
+            )
+        except Exception:
+            pass
+
+        if risk_free_rate_pct is None:
+            try:
+                risk_free_rate_pct = valid_number(tnx.fast_info["last_price"])
+            except Exception:
+                pass
+
+        if risk_free_rate_pct is None:
+            tnx_history = tnx.history(
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+            )
+            if tnx_history is not None and not tnx_history.empty:
+                risk_free_rate_pct = valid_number(
+                    tnx_history["Close"].dropna().iloc[-1]
+                )
     except Exception:
-        risk_free_rate = None
+        risk_free_rate_pct = None
+
+    risk_free_rate = (
+        risk_free_rate_pct / 100
+        if risk_free_rate_pct is not None
+        else None
+    )
 
     capm_return = None
     if beta is not None and risk_free_rate is not None:
         capm_return = risk_free_rate + beta * ERP
 
     def pct_gain(target):
-        if target is None or not current_price:
+        if target is None or current_price is None or current_price <= 0:
             return None
         return round((target - current_price) / current_price * 100, 1)
+
+    capm_return_pct = (
+        round(capm_return * 100, 2)
+        if capm_return is not None
+        else None
+    )
 
     result = {
         "ticker": ticker,
         "current_price": current_price,
-        "risk_free_rate_pct": round(risk_free_rate * 100, 2) if risk_free_rate is not None else None,
-        "beta": beta,
+        "risk_free_rate_pct": (
+            round(risk_free_rate_pct, 2)
+            if risk_free_rate_pct is not None
+            else None
+        ),
+        "beta": round(beta, 4) if beta is not None else None,
         "erp_pct": ERP * 100,
-        "capm_expected_return_pct": round(capm_return * 100, 2) if capm_return is not None else None,
-        "scenario_bearish": {"target_price": target_low, "gain_pct": pct_gain(target_low)},
+        "capm_expected_return_pct": capm_return_pct,
+        "scenario_bearish": {
+            "target_price": target_low,
+            "gain_pct": pct_gain(target_low),
+        },
         "scenario_base": {
             "target_price": target_mean,
             "gain_pct": pct_gain(target_mean),
-            "capm_return_pct": round(capm_return * 100, 2) if capm_return is not None else None,
+            "capm_return_pct": capm_return_pct,
         },
-        "scenario_bullish": {"target_price": target_high, "gain_pct": pct_gain(target_high)},
+        "scenario_bullish": {
+            "target_price": target_high,
+            "gain_pct": pct_gain(target_high),
+        },
         "analyst_count": analyst_count,
         "title": RETURNS_TEXT[lang]["title"],
         "explanation": RETURNS_TEXT[lang]["explanation"],
         "methodology": RETURNS_TEXT[lang]["methodology"],
     }
+
     set_cached("returns_cache", cache_key, result)
     return result
+
 
 
 # ============================================================
