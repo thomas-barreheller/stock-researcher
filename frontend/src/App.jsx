@@ -194,6 +194,79 @@ function formatPct(lang, n, decimals = 1) {
 
 
 
+// __HISTORICAL_METRICS_V1__
+// Calcule des indicateurs uniquement à partir de l'historique fourni
+// par le backend. Ces valeurs restent disponibles lorsque Yahoo Finance
+// ne fournit pas toutes les données fondamentales.
+function computeHistoricalMetrics(priceHistory) {
+  if (!Array.isArray(priceHistory) || priceHistory.length < 2) return null;
+
+  const prices = priceHistory
+    .map((point) => Number(point?.close))
+    .filter((price) => Number.isFinite(price) && price > 0);
+
+  if (prices.length < 2) return null;
+
+  const lastPrice = prices[prices.length - 1];
+
+  function periodReturn(tradingDays) {
+    if (prices.length <= tradingDays) return null;
+    const startPrice = prices[prices.length - 1 - tradingDays];
+    if (!startPrice) return null;
+    return ((lastPrice - startPrice) / startPrice) * 100;
+  }
+
+  const dailyReturns = [];
+
+  for (let index = 1; index < prices.length; index += 1) {
+    dailyReturns.push((prices[index] - prices[index - 1]) / prices[index - 1]);
+  }
+
+  let annualizedVolatility = null;
+
+  if (dailyReturns.length > 1) {
+    const average =
+      dailyReturns.reduce((sum, value) => sum + value, 0) /
+      dailyReturns.length;
+
+    const variance =
+      dailyReturns.reduce(
+        (sum, value) => sum + (value - average) ** 2,
+        0
+      ) /
+      (dailyReturns.length - 1);
+
+    annualizedVolatility = Math.sqrt(variance) * Math.sqrt(252) * 100;
+  }
+
+  let highestPrice = prices[0];
+  let maximumDrawdown = 0;
+
+  for (const price of prices) {
+    highestPrice = Math.max(highestPrice, price);
+    const drawdown = ((price - highestPrice) / highestPrice) * 100;
+    maximumDrawdown = Math.min(maximumDrawdown, drawdown);
+  }
+
+  const smaWindow = prices.slice(-Math.min(200, prices.length));
+  const sma200 =
+    smaWindow.reduce((sum, price) => sum + price, 0) / smaWindow.length;
+
+  const distanceFromSma200 =
+    sma200 > 0 ? ((lastPrice - sma200) / sma200) * 100 : null;
+
+  return {
+    return1yPct:
+      prices.length > 252
+        ? periodReturn(252)
+        : ((lastPrice - prices[0]) / prices[0]) * 100,
+    return3mPct: periodReturn(63),
+    annualizedVolatilityPct: annualizedVolatility,
+    maximumDrawdownPct: maximumDrawdown,
+    distanceFromSma200Pct: distanceFromSma200,
+  };
+}
+
 const UI_TEXT = {
 
 
@@ -2277,6 +2350,23 @@ function App() {
 
 
 
+  const historicalMetrics = computeHistoricalMetrics(
+    stock?.price_history
+  );
+
+  const availableFundamentals = stock
+    ? [
+        stock.pe_ratio,
+        stock.forward_pe,
+        stock.eps,
+        stock.peg_ratio,
+        stock.profit_margin,
+        stock.beta ?? expReturns?.beta,
+        stock.debt_to_equity,
+        stock.dividend_yield,
+      ].filter((value) => value != null && !Number.isNaN(Number(value))).length
+    : 0;
+
   return (
 
 
@@ -2936,6 +3026,17 @@ function App() {
 
 
 
+                  {stock.price_history?.length > 1 &&
+                    availableFundamentals < 4 && (
+                      <div className="mt-5 rounded-xl border border-sky/20 bg-sky/5 p-3">
+                        <p className="text-xs leading-relaxed text-ink-muted">
+                          {lang === "fr"
+                            ? "Certaines données fondamentales ne sont pas disponibles pour cette action. Les indicateurs historiques ci-dessous sont calculés directement à partir des cours disponibles."
+                            : "Some fundamental data is unavailable for this stock. The historical indicators below are calculated directly from the available prices."}
+                        </p>
+                      </div>
+                    )}
+
                   {rangePct !== null && (
 
 
@@ -3069,6 +3170,123 @@ function App() {
 
 
                     <MetricLabel label={t.metricLabels.beta} tooltip={t.metricTooltips.beta} value={formatNum(lang, stock.beta ?? expReturns?.beta)} simpleMode={simpleMode} isOpen={openMetric === "beta"} onToggle={() => setOpenMetric(openMetric === "beta" ? null : "beta")} />
+                    <MetricLabel
+                      label={lang === "fr" ? "Performance sur 1 an" : "1-year performance"}
+                      tooltip={
+                        lang === "fr"
+                          ? "Variation du cours entre le début et la fin de l'historique disponible, dividendes non inclus."
+                          : "Price change between the beginning and end of the available history, excluding dividends."
+                      }
+                      value={
+                        historicalMetrics?.return1yPct != null
+                          ? formatPct(lang, historicalMetrics.return1yPct)
+                          : null
+                      }
+                      simpleMode={simpleMode}
+                      isOpen={openMetric === "return_1y"}
+                      onToggle={() =>
+                        setOpenMetric(
+                          openMetric === "return_1y" ? null : "return_1y"
+                        )
+                      }
+                    />
+
+                    <MetricLabel
+                      label={lang === "fr" ? "Performance sur 3 mois" : "3-month performance"}
+                      tooltip={
+                        lang === "fr"
+                          ? "Variation du cours sur environ 63 séances de bourse."
+                          : "Price change over approximately 63 trading sessions."
+                      }
+                      value={
+                        historicalMetrics?.return3mPct != null
+                          ? formatPct(lang, historicalMetrics.return3mPct)
+                          : null
+                      }
+                      simpleMode={simpleMode}
+                      isOpen={openMetric === "return_3m"}
+                      onToggle={() =>
+                        setOpenMetric(
+                          openMetric === "return_3m" ? null : "return_3m"
+                        )
+                      }
+                    />
+
+                    <MetricLabel
+                      label={lang === "fr" ? "Volatilité annualisée" : "Annualized volatility"}
+                      tooltip={
+                        lang === "fr"
+                          ? "Amplitude annualisée des variations quotidiennes. Une valeur élevée indique des mouvements de cours plus importants."
+                          : "Annualized magnitude of daily price changes. A higher value indicates larger price movements."
+                      }
+                      value={
+                        historicalMetrics?.annualizedVolatilityPct != null
+                          ? formatPct(
+                              lang,
+                              historicalMetrics.annualizedVolatilityPct
+                            )
+                          : null
+                      }
+                      simpleMode={simpleMode}
+                      isOpen={openMetric === "volatility"}
+                      onToggle={() =>
+                        setOpenMetric(
+                          openMetric === "volatility" ? null : "volatility"
+                        )
+                      }
+                    />
+
+                    <MetricLabel
+                      label={lang === "fr" ? "Baisse maximale sur 1 an" : "Maximum 1-year drawdown"}
+                      tooltip={
+                        lang === "fr"
+                          ? "Plus forte baisse observée entre un sommet et le creux suivant dans l'historique disponible."
+                          : "Largest observed decline from a peak to the following low in the available history."
+                      }
+                      value={
+                        historicalMetrics?.maximumDrawdownPct != null
+                          ? formatPct(
+                              lang,
+                              historicalMetrics.maximumDrawdownPct
+                            )
+                          : null
+                      }
+                      simpleMode={simpleMode}
+                      isOpen={openMetric === "drawdown"}
+                      onToggle={() =>
+                        setOpenMetric(
+                          openMetric === "drawdown" ? null : "drawdown"
+                        )
+                      }
+                    />
+
+                    <MetricLabel
+                      label={
+                        lang === "fr"
+                          ? "Écart à la moyenne 200 jours"
+                          : "Distance from 200-day average"
+                      }
+                      tooltip={
+                        lang === "fr"
+                          ? "Écart entre le dernier cours et la moyenne des 200 dernières séances disponibles."
+                          : "Difference between the latest price and the average of the last 200 available sessions."
+                      }
+                      value={
+                        historicalMetrics?.distanceFromSma200Pct != null
+                          ? formatPct(
+                              lang,
+                              historicalMetrics.distanceFromSma200Pct
+                            )
+                          : null
+                      }
+                      simpleMode={simpleMode}
+                      isOpen={openMetric === "sma200"}
+                      onToggle={() =>
+                        setOpenMetric(
+                          openMetric === "sma200" ? null : "sma200"
+                        )
+                      }
+                    />
 
 
 
