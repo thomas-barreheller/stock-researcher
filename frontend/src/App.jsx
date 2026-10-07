@@ -1080,6 +1080,8 @@ function ExplainToggle({ title, explanation, methodology, forceOpen, t }) {
 
 
 function MetricLabel({ label, tooltip, value, simpleMode, isOpen, onToggle }) {
+  if (value == null || value === "N/A") return null;
+
 
 
 
@@ -3066,7 +3068,7 @@ function App() {
 
 
 
-                    <MetricLabel label={t.metricLabels.beta} tooltip={t.metricTooltips.beta} value={formatNum(lang, stock.beta)} simpleMode={simpleMode} isOpen={openMetric === "beta"} onToggle={() => setOpenMetric(openMetric === "beta" ? null : "beta")} />
+                    <MetricLabel label={t.metricLabels.beta} tooltip={t.metricTooltips.beta} value={formatNum(lang, stock.beta ?? expReturns?.beta)} simpleMode={simpleMode} isOpen={openMetric === "beta"} onToggle={() => setOpenMetric(openMetric === "beta" ? null : "beta")} />
 
 
 
@@ -3392,110 +3394,60 @@ function App() {
 
 
 
-                    <div className="mt-5">
+                    {expReturns.scenario_bearish.target_price != null ||
+                    expReturns.scenario_bullish.target_price != null ? (
+                      <div className="mt-5">
+                        <h4 className="mb-2 text-sm font-semibold text-ink">
+                          {lang === "fr" ? "Objectifs de cours des analystes" : "Analyst price targets"}
+                        </h4>
+                        <p className="mb-3 text-xs leading-relaxed text-ink-muted">
+                          {lang === "fr"
+                            ? "Écarts entre le cours actuel et les objectifs publiés ; ce ne sont pas des gains garantis."
+                            : "Differences between the current price and published targets; these are not guaranteed returns."}
+                        </p>
 
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          {expReturns.scenario_bearish.target_price != null && (
+                            <div className="rounded-xl bg-ink/5 p-3">
+                              <p className="text-xs text-ink-muted">
+                                {lang === "fr" ? "Objectif bas" : "Low target"}
+                              </p>
+                              <p className="mt-1 tabular-nums font-display text-xl font-semibold text-ink">
+                                {formatPct(lang, expReturns.scenario_bearish.gain_pct)}
+                              </p>
+                              <p className="text-xs text-ink-muted">
+                                {formatNum(lang, expReturns.scenario_bearish.target_price)} {stock.currency}
+                              </p>
+                            </div>
+                          )}
 
-                      <h4 className="mb-2 text-sm font-semibold text-ink">
-
-
-                        {lang === "fr" ? "Objectifs de cours des analystes" : "Analyst price targets"}
-
-
-                      </h4>
-
-
-                      <p className="mb-3 text-xs leading-relaxed text-ink-muted">
-
-
-                        {lang === "fr"
-
-
-                          ? "Écarts entre le cours actuel et les objectifs publiés ; ce ne sont pas des gains garantis."
-
-
-                          : "Differences between the current price and published targets; these are not guaranteed returns."}
-
-
-                      </p>
-
-
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-
-
-                        <div className="rounded-xl bg-ink/5 p-3">
-
-
-                          <p className="text-xs text-ink-muted">
-
-
-                            {lang === "fr" ? "Objectif bas" : "Low target"}
-
-
-                          </p>
-
-
-                          <p className="mt-1 tabular-nums font-display text-xl font-semibold text-ink">
-
-
-                            {formatPct(lang, expReturns.scenario_bearish.gain_pct)}
-
-
-                          </p>
-
-
-                          <p className="text-xs text-ink-muted">
-
-
-                            {formatNum(lang, expReturns.scenario_bearish.target_price)} {stock.currency}
-
-
-                          </p>
-
-
+                          {expReturns.scenario_bullish.target_price != null && (
+                            <div className="rounded-xl bg-ink/5 p-3">
+                              <p className="text-xs text-ink-muted">
+                                {lang === "fr" ? "Objectif haut" : "High target"}
+                              </p>
+                              <p className="mt-1 tabular-nums font-display text-xl font-semibold text-ink">
+                                {formatPct(lang, expReturns.scenario_bullish.gain_pct)}
+                              </p>
+                              <p className="text-xs text-ink-muted">
+                                {formatNum(lang, expReturns.scenario_bullish.target_price)} {stock.currency}
+                              </p>
+                            </div>
+                          )}
                         </div>
-
-
-                        <div className="rounded-xl bg-ink/5 p-3">
-
-
-                          <p className="text-xs text-ink-muted">
-
-
-                            {lang === "fr" ? "Objectif haut" : "High target"}
-
-
-                          </p>
-
-
-                          <p className="mt-1 tabular-nums font-display text-xl font-semibold text-ink">
-
-
-                            {formatPct(lang, expReturns.scenario_bullish.gain_pct)}
-
-
-                          </p>
-
-
-                          <p className="text-xs text-ink-muted">
-
-
-                            {formatNum(lang, expReturns.scenario_bullish.target_price)} {stock.currency}
-
-
-                          </p>
-
-
-                        </div>
-
-
                       </div>
-
-
-                    </div>
-
-
-
-
+                    ) : (
+                      <div className="mt-5 rounded-xl bg-ink/5 p-4">
+                        <h4 className="text-sm font-semibold text-ink">
+                          {lang === "fr" ? "Objectifs de cours des analystes" : "Analyst price targets"}
+                        </h4>
+                        <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+                          {lang === "fr"
+                            ? "Les objectifs de cours des analystes sont indisponibles pour cette action auprès de la source actuelle."
+                            : "Analyst price targets are unavailable for this stock from the current data source."}
+                        </p>
+                      </div>
+                    )}
 
                     <div className="mt-4 rounded-lg bg-ink/5 p-3 text-xs text-ink-muted">
 
